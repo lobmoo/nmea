@@ -1,40 +1,26 @@
 /**
- * @file nema.c
+ * @file nmea.c
  * @brief 
  * @author wwk (1162431386@qq.com)
  * @version 1.0
- * @date 2022-03-31
+ * @date 2024-06-03
  * 
- * @copyright Copyright (c) 2022  Hangzhou Hikvision
+ * @copyright Copyright (c) 2024  by  xxx
  * 
- * @par 修改日志:移植nema
+ * @par 修改日志:
+ * <table>
+ * <tr><th>Date       <th>Version <th>Author  <th>Description
+ * <tr><td>2024-06-03     <td>1.0     <td>wwk   <td>修改?
+ * </table>
  */
-
-#include "nmea.h"
+#include "minmea.h"
 
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 #include <stdarg.h>
-#include <time.h>
 
-/**
- * @brief 判断字符能否打印 ',' '*' 除外
- * @param  c               
- * @return true 
- * @return false 
- */
-static inline bool minmea_isfield(char c) {
-    return isprint((unsigned char) c) && c != ',' && c != '*';
-}
+#define boolstr(s) ((s) ? "true" : "false")
 
-
-
-/**
- * @brief 进制转化
- * @param  c                
- * @return int 
- */
 static int hex2int(char c)
 {
     if (c >= '0' && c <= '9')
@@ -46,18 +32,73 @@ static int hex2int(char c)
     return -1;
 }
 
-/**
- * @brief 按照可变参数放入gps数据
- * @param  sentence        原始数据
- * @param  format          格式
- * @param  ...             c：类型 d：经纬度类型 f:分度 
- * @return true 
- * @return false 
- */
+uint8_t minmea_checksum(const char *sentence)
+{
+    // Support senteces with or without the starting dollar sign.
+    if (*sentence == '$')
+        sentence++;
+
+    uint8_t checksum = 0x00;
+
+    // The optional checksum is an XOR of all bytes between "$" and "*".
+    while (*sentence && *sentence != '*')
+        checksum ^= *sentence++;
+
+    return checksum;
+}
+
+bool minmea_check(const char *sentence, bool strict)
+{
+    uint8_t checksum = 0x00;
+
+    // A valid sentence starts with "$".
+    if (*sentence++ != '$')
+        return false;
+
+    // The optional checksum is an XOR of all bytes between "$" and "*".
+    while (*sentence && *sentence != '*' && isprint((unsigned char) *sentence))
+        checksum ^= *sentence++;
+
+    // If checksum is present...
+    if (*sentence == '*') {
+        // Extract checksum.
+        sentence++;
+        int upper = hex2int(*sentence++);
+        if (upper == -1)
+            return false;
+        int lower = hex2int(*sentence++);
+        if (lower == -1)
+            return false;
+        int expected = upper << 4 | lower;
+
+        // Check for checksum mismatch.
+        if (checksum != expected)
+            return false;
+    } else if (strict) {
+        // Discard non-checksummed frames in strict mode.
+        return false;
+    }
+
+    // The only stuff allowed at this point is a newline.
+    while (*sentence == '\r' || *sentence == '\n') {
+        sentence++;
+    }
+    
+    if (*sentence) {
+        return false;
+    }
+
+    return true;
+}
+
 bool minmea_scan(const char *sentence, const char *format, ...)
 {
     bool result = false;
     bool optional = false;
+
+    if (sentence == NULL)
+        return false;
+
     va_list ap;
     va_start(ap, format);
 
@@ -301,102 +342,19 @@ parse_error:
     return result;
 }
 
-
-
-static inline int_least32_t minmea_rescale(struct minmea_float *f, int_least32_t new_scale)
+bool minmea_talker_id(char talker[3], const char *sentence)
 {
-    if (f->scale == 0)
-        return 0;
-    if (f->scale == new_scale)
-        return f->value;
-    if (f->scale > new_scale)
-        return (f->value + ((f->value > 0) - (f->value < 0)) * f->scale/new_scale/2) / (f->scale/new_scale);
-    else
-        return f->value * (new_scale/f->scale);
-}
-
-/**
- * Convert a fixed-point value to a floating-point value.
- * Returns NaN for "unknown" values.
- */
-static inline float minmea_tofloat(struct minmea_float *f)
-{
-    if (f->scale == 0)
-        return NAN;
-    return (float) f->value / (float) f->scale;
-}
-
-/**
- * Convert a raw coordinate to a floating point DD.DDD... value.
- * Returns NaN for "unknown" values.
- */
-static inline float minmea_tocoord(struct minmea_float *f)
-{
-    if (f->scale == 0)
-        return NAN;
-    int_least32_t degrees = f->value / (f->scale * 100);
-    int_least32_t minutes = f->value % (f->scale * 100);
-    return (float) degrees + (float) minutes / (60 * f->scale);
-}
-
-
-/**
- * @brief 校验数据完整性
- * @param  sentence         原始数据
- * @param  strict           是否为严格模式 该项设置为true后，校验和失败的数据则会直接丢失
- * @return true             false 
- */
-bool minmea_check(const char *sentence, bool strict)
-{
-    uint8_t checksum = 0x00;
-
-     /* Sequence length is limited*/
-    if (strlen(sentence) > MINMEA_MAX_LENGTH + 3)
+    char type[6];
+    if (!minmea_scan(sentence, "t", type))
         return false;
 
-    // A valid sentence starts with "$".
-    if (*sentence++ != '$')
-        return false;
-
-    // The optional checksum is an XOR of all bytes between "$" and "*".
-    while (*sentence && *sentence != '*' && isprint((unsigned char) *sentence))
-        checksum ^= *sentence++;
-
-    // If checksum is present...
-    if (*sentence == '*') {
-        // Extract checksum.
-        sentence++;
-        int upper = hex2int(*sentence++);
-        if (upper == -1)
-            return false;
-        int lower = hex2int(*sentence++);
-        if (lower == -1)
-            return false;
-        int expected = upper << 4 | lower;
-
-        // Check for checksum mismatch.
-        if (checksum != expected)
-            return false;
-    } else if (strict) {
-        /*校验和失败的数据则会直接丢失*/   
-        return false;
-    }
-  
-    // The only stuff allowed at this point is a newline.
-    if (*sentence && strcmp(sentence, "\n") && strcmp(sentence, "\r\n")){
-        return false;
-        }
+    talker[0] = type[0];
+    talker[1] = type[1];
+    talker[2] = '\0';
 
     return true;
 }
 
-
-/**
- * @brief 获取解析id
- * @param  sentence       原始数据
- * @param  strict         是否为严格模式 该项设置为true后，校验和失败的数据则会直接丢失，建议false
- * @return enum minmea_sentence_id 
- */
 enum minmea_sentence_id minmea_sentence_id(const char *sentence, bool strict)
 {
     if (!minmea_check(sentence, strict))
@@ -406,23 +364,50 @@ enum minmea_sentence_id minmea_sentence_id(const char *sentence, bool strict)
     if (!minmea_scan(sentence, "t", type))
         return MINMEA_INVALID;
 
-    if (!strcmp(type+2, "RMC"))
-        return MINMEA_SENTENCE_RMC;
+    if (!strcmp(type+2, "GBS"))
+        return MINMEA_SENTENCE_GBS;
     if (!strcmp(type+2, "GGA"))
         return MINMEA_SENTENCE_GGA;
+    if (!strcmp(type+2, "GLL"))
+        return MINMEA_SENTENCE_GLL;
     if (!strcmp(type+2, "GSA"))
         return MINMEA_SENTENCE_GSA;
+    if (!strcmp(type+2, "GST"))
+        return MINMEA_SENTENCE_GST;
     if (!strcmp(type+2, "GSV"))
         return MINMEA_SENTENCE_GSV;
+    if (!strcmp(type+2, "RMC"))
+        return MINMEA_SENTENCE_RMC;
+    if (!strcmp(type+2, "VTG"))
+        return MINMEA_SENTENCE_VTG;
+    if (!strcmp(type+2, "ZDA"))
+        return MINMEA_SENTENCE_ZDA;
+
     return MINMEA_UNKNOWN;
 }
 
-/**
- * @brief 解析rmc
- * @param  frame            rmc结构
- * @param  sentence         原始数据
- * @return true false
- */
+bool minmea_parse_gbs(struct minmea_sentence_gbs *frame, const char *sentence)
+{
+    // $GNGBS,170556.00,3.0,2.9,8.3,,,,*5C
+    char type[6];
+    if (!minmea_scan(sentence, "tTfffifff",
+            type,
+            &frame->time,
+            &frame->err_latitude,
+            &frame->err_longitude,
+            &frame->err_altitude,
+            &frame->svid,
+            &frame->prob,
+            &frame->bias,
+            &frame->stddev
+            ))
+        return false;
+    if (strcmp(type+2, "GBS"))
+        return false;
+
+    return true;
+}
+
 bool minmea_parse_rmc(struct minmea_sentence_rmc *frame, const char *sentence)
 {
     // $GPRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E*62
@@ -453,13 +438,6 @@ bool minmea_parse_rmc(struct minmea_sentence_rmc *frame, const char *sentence)
     return true;
 }
 
-/**
- * @brief 解析gga
- * @param  frame           gga结构
- * @param  sentence        原始数据
- * @return true 
- * @return false 
- */
 bool minmea_parse_gga(struct minmea_sentence_gga *frame, const char *sentence)
 {
     // $GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47
@@ -488,13 +466,6 @@ bool minmea_parse_gga(struct minmea_sentence_gga *frame, const char *sentence)
     return true;
 }
 
-/**
- * @brief  解析gsa
- * @param  frame           gsa结构
- * @param  sentence        原始数据
- * @return true 
- * @return false 
- */
 bool minmea_parse_gsa(struct minmea_sentence_gsa *frame, const char *sentence)
 {
     // $GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*39
@@ -526,16 +497,59 @@ bool minmea_parse_gsa(struct minmea_sentence_gsa *frame, const char *sentence)
     return true;
 }
 
-/**
- * @brief 解析gsv
- * @param  frame          gsv结构
- * @param  sentence       原始数据
- * @return true 
- * @return false 
- */
+bool minmea_parse_gll(struct minmea_sentence_gll *frame, const char *sentence)
+{
+    // $GPGLL,3723.2475,N,12158.3416,W,161229.487,A,A*41$;
+    char type[6];
+    int latitude_direction;
+    int longitude_direction;
+
+    if (!minmea_scan(sentence, "tfdfdTc;c",
+            type,
+            &frame->latitude, &latitude_direction,
+            &frame->longitude, &longitude_direction,
+            &frame->time,
+            &frame->status,
+            &frame->mode))
+        return false;
+    if (strcmp(type+2, "GLL"))
+        return false;
+
+    frame->latitude.value *= latitude_direction;
+    frame->longitude.value *= longitude_direction;
+
+    return true;
+}
+
+bool minmea_parse_gst(struct minmea_sentence_gst *frame, const char *sentence)
+{
+    // $GPGST,024603.00,3.2,6.6,4.7,47.3,5.8,5.6,22.0*58
+    char type[6];
+
+    if (!minmea_scan(sentence, "tTfffffff",
+            type,
+            &frame->time,
+            &frame->rms_deviation,
+            &frame->semi_major_deviation,
+            &frame->semi_minor_deviation,
+            &frame->semi_major_orientation,
+            &frame->latitude_error_deviation,
+            &frame->longitude_error_deviation,
+            &frame->altitude_error_deviation))
+        return false;
+    if (strcmp(type+2, "GST"))
+        return false;
+
+    return true;
+}
+
 bool minmea_parse_gsv(struct minmea_sentence_gsv *frame, const char *sentence)
 {
     // $GPGSV,3,1,11,03,03,111,00,04,15,270,00,06,01,010,00,13,06,292,00*74
+    // $GPGSV,3,3,11,22,42,067,42,24,14,311,43,27,05,244,00,,,,*4D
+    // $GPGSV,4,2,11,08,51,203,30,09,45,215,28*75
+    // $GPGSV,4,4,13,39,31,170,27*40
+    // $GPGSV,4,4,13*7B
     char type[6];
 
     if (!minmea_scan(sentence, "tiii;iiiiiiiiiiiiiiii",
@@ -565,165 +579,108 @@ bool minmea_parse_gsv(struct minmea_sentence_gsv *frame, const char *sentence)
     if (strcmp(type+2, "GSV"))
         return false;
 
-    memcpy(frame->type,type,sizeof(type));
     return true;
 }
 
-
-
-#if 1
-/**
- * @brief TEST DEMO 
- * @return int 
- */
-int TEST_nmea(char *str)
+bool minmea_parse_vtg(struct minmea_sentence_vtg *frame, const char *sentence)
 {
-    switch (minmea_sentence_id(str, false)) {
-        case MINMEA_SENTENCE_RMC: {
-            struct minmea_sentence_rmc frame;
-            if (minmea_parse_rmc(&frame, str)) {
-                printf("$xxRMC: raw coordinates and speed: (%d/%d,%d/%d) %d/%d\n",
-                        frame.latitude.value, frame.latitude.scale,
-                        frame.longitude.value, frame.longitude.scale,
-                        frame.speed.value, frame.speed.scale);
-                printf("$xxRMC fixed-point coordinates and speed scaled to three decimal places: (%d,%d) %d\n",
-                        minmea_rescale(&frame.latitude, 1000),
-                        minmea_rescale(&frame.longitude, 1000),
-                        minmea_rescale(&frame.speed, 1000));
-                printf("$xxRMC floating point degree coordinates and speed: (%f,%f) %f\n",
-                        minmea_tocoord(&frame.latitude),
-                        minmea_tocoord(&frame.longitude),
-                        minmea_tofloat(&frame.speed));
+    // $GPVTG,054.7,T,034.4,M,005.5,N,010.2,K*48
+    // $GPVTG,156.1,T,140.9,M,0.0,N,0.0,K*41
+    // $GPVTG,096.5,T,083.5,M,0.0,N,0.0,K,D*22
+    // $GPVTG,188.36,T,,M,0.820,N,1.519,K,A*3F
+    char type[6];
+    char c_true, c_magnetic, c_knots, c_kph, c_faa_mode;
 
-            }
-            else {
-                printf("$xxRMC sentence is not parsed\n");
-            }
-        } break;
-        case MINMEA_SENTENCE_GGA: {
-            struct minmea_sentence_gga frame;
-            if (minmea_parse_gga(&frame, str)) {
-                printf("$xxGGA: fix quality: %d\n", frame.fix_quality);
-            }
-            else {
-                printf("$xxGGA sentence is not parsed\n");
-            }
-        } break;
+    if (!minmea_scan(sentence, "t;fcfcfcfcc",
+            type,
+            &frame->true_track_degrees,
+            &c_true,
+            &frame->magnetic_track_degrees,
+            &c_magnetic,
+            &frame->speed_knots,
+            &c_knots,
+            &frame->speed_kph,
+            &c_kph,
+            &c_faa_mode))
+        return false;
+    if (strcmp(type+2, "VTG"))
+        return false;
+    // values are only valid with the accompanying characters
+    if (c_true != 'T')
+        frame->true_track_degrees.scale = 0;
+    if (c_magnetic != 'M')
+        frame->magnetic_track_degrees.scale = 0;
+    if (c_knots != 'N')
+        frame->speed_knots.scale = 0;
+    if (c_kph != 'K')
+        frame->speed_kph.scale = 0;
+    frame->faa_mode = (enum minmea_faa_mode)c_faa_mode;
 
-        case MINMEA_SENTENCE_GSV: {
-            struct minmea_sentence_gsv frame;
-            if (minmea_parse_gsv(&frame, str)) {
-                printf("$xxGSV: message %d of %d\n", frame.msg_nr, frame.total_msgs);
-                printf("$xxGSV: sattelites in view: %d\n", frame.total_sats);
-                for (int i = 0; i < 4; i++)
-                    printf("$xxGSV: sat nr %d, elevation: %d, azimuth: %d, snr: %d dbm\n",
-                        frame.sats[i].nr,
-                        frame.sats[i].elevation,
-                        frame.sats[i].azimuth,
-                        frame.sats[i].snr);
-            }
-            else {
-                printf("$xxGSV sentence is not parsed\n");
-            }
-        } break;
+    return true;
+}
 
-        case MINMEA_SENTENCE_GSA:
-        {
-            struct minmea_sentence_gsa frame;
-            if (minmea_parse_gsa(&frame, str)){
+bool minmea_parse_zda(struct minmea_sentence_zda *frame, const char *sentence)
+{
+  // $GPZDA,201530.00,04,07,2002,00,00*60
+  char type[6];
 
-                 /*保留，若使用可自行添加*/
+  if(!minmea_scan(sentence, "tTiiiii",
+          type,
+          &frame->time,
+          &frame->date.day,
+          &frame->date.month,
+          &frame->date.year,
+          &frame->hour_offset,
+          &frame->minute_offset))
+      return false;
+  if (strcmp(type+2, "ZDA"))
+      return false;
 
-             }
+  // check offsets
+  if (abs(frame->hour_offset) > 13 ||
+      frame->minute_offset > 59 ||
+      frame->minute_offset < 0)
+      return false;
 
-        }break;
+  return true;
+}
 
-        default: {
-            printf("$xxxxx sentence is not parsed\n");
-        } break;
+int minmea_getdatetime(struct tm *tm, const struct minmea_date *date, const struct minmea_time *time_)
+{
+    if (date->year == -1 || time_->hours == -1)
+        return -1;
+
+    memset(tm, 0, sizeof(*tm));
+    if (date->year < 80) {
+        tm->tm_year = 2000 + date->year - 1900; // 2000-2079
+    } else if (date->year >= 1900) {
+        tm->tm_year = date->year - 1900;        // 4 digit year, use directly
+    } else {
+        tm->tm_year = date->year;               // 1980-1999
     }
+    tm->tm_mon = date->month - 1;
+    tm->tm_mday = date->day;
+    tm->tm_hour = time_->hours;
+    tm->tm_min = time_->minutes;
+    tm->tm_sec = time_->seconds;
+
     return 0;
 }
-#endif
 
-
-
-
-#if 1
-/**
- * @brief TEST DEMO 
- * @return int 
- */
-int main(void)
+int minmea_gettime(struct timespec *ts, const struct minmea_date *date, const struct minmea_time *time_)
 {
-    char* str = "$GNRMC,074733.000,A,3011.29994,N,12012.34471,E,0.00,0.00,210422,,,A*7A";
-    switch (minmea_sentence_id(str, false)) {
-        case MINMEA_SENTENCE_RMC: {
-            struct minmea_sentence_rmc frame;
-            if (minmea_parse_rmc(&frame, str)) {
-                printf("$xxRMC: raw coordinates and speed: (%d/%d,%d/%d) %d/%d\n",
-                        frame.latitude.value, frame.latitude.scale,
-                        frame.longitude.value, frame.longitude.scale,
-                        frame.speed.value, frame.speed.scale);
-                printf("$xxRMC fixed-point coordinates and speed scaled to three decimal places: (%d,%d) %d\n",
-                        minmea_rescale(&frame.latitude, 1000),
-                        minmea_rescale(&frame.longitude, 1000),
-                        minmea_rescale(&frame.speed, 1000));
-                printf("$xxRMC floating point degree coordinates and speed: (%f,%f) %f\n",
-                        minmea_tocoord(&frame.latitude),
-                        minmea_tocoord(&frame.longitude),
-                        minmea_tofloat(&frame.speed));
+    struct tm tm;
+    if (minmea_getdatetime(&tm, date, time_))
+        return -1;
 
-            }
-            else {
-                printf("$xxRMC sentence is not parsed\n");
-            }
-        } break;
-        case MINMEA_SENTENCE_GGA: {
-            struct minmea_sentence_gga frame;
-            if (minmea_parse_gga(&frame, str)) {
-                printf("$xxGGA: fix quality: %d\n", frame.fix_quality);
-            }
-            else {
-                printf("$xxGGA sentence is not parsed\n");
-            }
-        } break;
-
-        case MINMEA_SENTENCE_GSV: {
-            struct minmea_sentence_gsv frame;
-            if (minmea_parse_gsv(&frame, str)) {
-                printf("$xxGSV: message %d of %d\n", frame.msg_nr, frame.total_msgs);
-                printf("$xxGSV: sattelites in view: %d\n", frame.total_sats);
-                printf("$xxGSV: type: %s\n", frame.type);
-
-
-                for (int i = 0; i < 4; i++)
-                    printf("$xxGSV: sat nr %d, elevation: %d, azimuth: %d, snr: %d dbm\n",
-                        frame.sats[i].nr,
-                        frame.sats[i].elevation,
-                        frame.sats[i].azimuth,
-                        frame.sats[i].snr);
-            }
-            else {
-                printf("$xxGSV sentence is not parsed\n");
-            }
-        } break;
-
-        case MINMEA_SENTENCE_GSA:
-        {
-            struct minmea_sentence_gsa frame;
-            if (minmea_parse_gsa(&frame, str)){
-
-                 /*保留，若使用可自行添加*/
-
-             }
-
-        }break;
-
-        default: {
-            printf("$xxxxx sentence is not parsed\n");
-        } break;
+    time_t timestamp = timegm(&tm); /* See README.md if your system lacks timegm(). */
+    if (timestamp != (time_t)-1) {
+        ts->tv_sec = timestamp;
+        ts->tv_nsec = time_->microseconds * 1000;
+        return 0;
+    } else {
+        return -1;
     }
-    return 0;
 }
-#endif
+
+/* vim: set ts=4 sw=4 et: */
